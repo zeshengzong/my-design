@@ -47,28 +47,42 @@
 - ✅ **AI 友好**：天然支持 AI Agent 通过 MCP 查询组织数据并做智能分析
 - ⚠️ **前置依赖**：需社区基础设施团队配合开发 MCP Server，建议先实现只读 Tools，后续可扩展写入能力
 
-#### 降级方案
+### 数据源 2：会议记录（MCP Server）
 
-当 MCP Server 不可用时，系统降级为直接读取社区 community 仓库下的 YAML 文件：
+由社区基础设施团队实现 **Ascend Meeting MCP Server**，将 Ascend Meeting Center 的查询接口封装为标准 MCP Tools，供本系统及 AI Agent 调用。
 
-- `org-info.yaml`：获取项目列表、TC 成员、SIG Maintainer 等
-- `sigs/*/sig-info.yaml`：获取 SIG 的 Committer/Reviewer、meeting_url 等
-- 组织运作规则文件：提取运作标准和频率
+**MCP Server 需暴露的核心 Tools：**
 
-> 注：降级方案仅覆盖 TC/SIG 数据，理事会、专家委员会等组织的数据必须通过 MCP Server 获取。
+| Tool 名称 | 描述 | 参数 | 返回 |
+|-----------|------|------|------|
+| `list_meeting_schedules` | 查询指定组织在指定周期内的会议预约记录 | `org_id: string, period: string` | 会议列表，含时间、主题、参会人 |
+| `get_meeting_attendance` | 查询指定会议的实际出席情况 | `meeting_id: string` | 实际参会人数、出席名单 |
+| `get_last_meeting` | 查询组织最近一次已召开的会议 | `org_id: string` | 会议时间、主题、出席人数 |
 
-### 数据源 2：会议记录
+**封装价值：**
 
-来源：Ascend Meeting 中心提供查询接口，仅需实现调用对应接口获取数据能力，接口支持如下查询：
+- ✅ **接口隔离**：Meeting Center REST API 变更时只需 MCP Server 侧适配，本系统调用方式不变
+- ✅ **语义化查询**：AI Agent 可通过自然语言意图映射到具体 Tool，无需理解底层 REST URL 规范
+- ✅ **统一接入层**：与数据源 1 架构一致，所有组织数据通过 MCP 统一获取
 
-- 各组织（SIG、TC、TSC、理事会、专家委员会、用户委员会、技术治理委员会等）的会议预约记录（时间、主题、参会人）
-- 实际参会人数和出席名单
+### 数据源 3：会议纪要（MCP Server）
 
-### 数据源 3：会议纪要
+由社区基础设施团队实现 **Etherpad MCP Server**，将 Etherpad 的内容查询接口封装为 MCP Tools 和 **MCP Resources**，供本系统及 AI Agent 调用。
 
-来源：Etherpad，社区基础设施提供查询接口，仅需实现调用对应接口获取数据能力，接口支持如下查询：
+**MCP Server 需暴露的核心 Tools 和 Resources：**
 
-- 各组织对应的 Etherpad pad 内容
+| 类型 | 名称 | 描述 | 参数 | 返回 |
+|------|------|------|------|------|
+| Tool | `get_pad_content` | 获取指定 pad 的完整内容 | `pad_name: string` | pad 全文（Markdown / 纯文本） |
+| Tool | `get_pad_last_updated` | 获取 pad 最后更新时间 | `pad_name: string` | 最后修改时间戳 |
+| Tool | `list_org_pads` | 列出组织关联的所有 pad | `org_id: string` | pad 名称列表及对应会议日期 |
+| Resource | `pad://{pad_name}` | 将 pad 内容作为 MCP Resource 暴露 | — | AI Agent 可直接订阅内容变更 |
+
+**纪要数据适合 MCP 的特殊价值：**
+
+- ✅ **LLM 直接可消费**：`get_pad_content` 返回的非结构化文本可直接传入 LLM，用于自动判断纪要是否包含出席人、讨论摘要、决议事项等质量要素，是三个数据源中 AI 替代人工最直接的场景
+- ✅ **Resource 类型支持订阅**：pad 作为 MCP Resource 暴露后，AI Agent 可主动感知纪要更新，实现"会后自动触发纪要质量检查"而无需轮询
+- ✅ **架构一致**：与数据源 1、2 统一通过 MCP 接入，系统无需维护三套不同的 HTTP 客户端
 
 ## 输出要求
 
@@ -175,11 +189,11 @@ Markdown 格式报告，包含：
            name: "王五"
            email: "wangwu@example.com"
    ```
-4. **打通 Meeting Center 数据**：确认 Ascend Meeting Center 是否提供 API；如无，设计定期数据抓取方案
+4. **接入 Meeting MCP Server 和 Etherpad MCP Server**：与社区基础设施团队协作，推动实现另外两个 MCP Server，分别封装 Ascend Meeting Center 和 Etherpad 的查询接口；对于 Meeting Center，确认其是否已有 REST API，如无需同步设计数据抓取方案
 
 ### 阶段二：监控与预警系统
 
-1. **开发会议状态轮询服务**：每日检查各组织本周期内是否已预约/已召开会议，更新状态（通过 MCP Server 获取组织列表和会议规则，通过 Meeting Center 接口获取会议记录）
+1. **开发会议状态轮询服务**：每日检查各组织本周期内是否已预约/已召开会议，更新状态（通过 Org MCP Server 获取组织列表和会议规则，通过 Meeting MCP Server 获取会议预约记录，通过 Etherpad MCP Server 检查纪要归档状态）
 2. **实现分级提醒引擎**：按上述提醒规则表，在触发条件满足时通过邮件/群消息通知相关人；提醒对象从 `meeting-registry.yaml` 的 `operators` 字段读取社区运营人员，确保风险预警准确送达对接运营
 3. **建设仪表盘**：实现全局概览、组织明细、风险预警、委员会追踪等核心视图
 
